@@ -202,6 +202,12 @@ struct cfs_bandwidth { };
 /* CFS-related fields in a runqueue */
 struct cfs_rq {
 	struct load_weight load;
+	/*
+	 * The difference between nr_running and h_nr_running is:
+	 * nr_running:   present how many entity would take part in the sharing
+	 *               the cpu power of that cfs_rq
+	 * h_nr_running: present how many tasks in current cfs runqueue
+	 */
 	unsigned long nr_running, h_nr_running;
 
 	u64 exec_clock;
@@ -424,6 +430,9 @@ struct rq {
 	u64 age_stamp;
 	u64 idle_stamp;
 	u64 avg_idle;
+
+	/* Set to max idle balance cost for any one sched domain */
+	u64 max_idle_balance_cost;
 #endif
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
@@ -1189,6 +1198,7 @@ extern void print_rt_stats(struct seq_file *m, int cpu);
 
 extern void init_cfs_rq(struct cfs_rq *cfs_rq);
 extern void init_rt_rq(struct rt_rq *rt_rq, struct rq *rq);
+extern int unthrottle_rt_rq(struct rq *rq);
 
 extern void cfs_bandwidth_usage_inc(void);
 extern void cfs_bandwidth_usage_dec(void);
