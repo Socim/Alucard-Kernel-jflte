@@ -9,12 +9,12 @@ fi;
 
 export PARENT_DIR=`readlink -f ..`
 export INITRAMFS_TMP=/tmp/initramfs_source;
-export INITRAMFS_SOURCE=`readlink -f ..`/Ramdisk
+export INITRAMFS_SOURCE=`readlink -f ..`/Ramdisk_Alucards
 export PACKAGEDIR=$KERNELDIR/READY-JB
 #Enable FIPS mode
 export USE_SEC_FIPS_MODE=true
 export ARCH=arm
-export CROSS_COMPILE=$PARENT_DIR/../arm-gnueabi-4.8.3/bin/arm-gnueabi-
+export CROSS_COMPILE=$PARENT_DIR/../arm-cortex_a15-linux-gnueabihf-linaro_4.8.3-2014.02/bin/arm-gnueabi-
 export KERNEL_CONFIG=alucard_defconfig;
 
 chmod -R 777 /tmp;
@@ -112,7 +112,7 @@ if [ -e $KERNELDIR/arch/arm/boot/zImage ]; then
 	echo "Make boot.img"
 	./mkbootfs $INITRAMFS_TMP | gzip > $PACKAGEDIR/ramdisk.gz
 	#./mkbootimg --kernel $PACKAGEDIR/zImage --ramdisk $PACKAGEDIR/ramdisk.gz --cmdline "console=null androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x3F ehci-hcd.park=3" -o $PACKAGEDIR/boot.img --base "0x80200000" --ramdiskaddr "0x82200000"
-	./mkbootimg --cmdline 'console = null androidboot.hardware=qcom user_debug=31 zcache androidboot.selinux=permissive' --kernel $PACKAGEDIR/zImage --ramdisk $PACKAGEDIR/ramdisk.gz --base 0x80200000 --pagesize 2048 --ramdisk_offset 0x02000000 --output $PACKAGEDIR/boot.img
+	./mkbootimg --cmdline 'console = null androidboot.hardware=qcom user_debug=31 zcache' --kernel $PACKAGEDIR/zImage --ramdisk $PACKAGEDIR/ramdisk.gz --base 0x80200000 --pagesize 2048 --ramdisk_offset 0x02000000 --output $PACKAGEDIR/boot.img
 	cd $PACKAGEDIR
 
 	if [ -e ramdisk.gz ]; then
