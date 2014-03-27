@@ -500,7 +500,7 @@ static void inform_charger(struct mxt_callbacks *cb,
 
 	cancel_delayed_work_sync(&data->noti_dwork);
 	data->charging_mode = en;
-	queue_delayed_work(system_power_efficient_wq, &data->noti_dwork, HZ / 5);
+	schedule_delayed_work(&data->noti_dwork, HZ / 5);
 }
 
 static void charger_noti_dwork(struct work_struct *work)
@@ -510,7 +510,7 @@ static void charger_noti_dwork(struct work_struct *work)
 		noti_dwork.work);
 
 	if (!data->mxt_enabled) {
-		queue_delayed_work(system_power_efficient_wq, &data->noti_dwork, HZ / 5);
+		schedule_delayed_work(&data->noti_dwork, HZ / 5);
 		return ;
 	}
 
@@ -545,12 +545,17 @@ static void mxt_set_dvfs_lock(struct mxt_data *data, uint32_t on)
 	int ret = 0;
 	int min_touch_limit = 0;
 	int touch_booster_time = 0;
+	int dvfs_boost_lvl = 0;
+
+	dvfs_boost_lvl = atomic_read(&dvfs_boost_mode);
+	if (dvfs_boost_lvl == 0)
+		return;
 
 	mutex_lock(&data->dvfs_lock);
 	if (on == 0) {
 		if (data->dvfs_lock_status) {
 			touch_booster_time = atomic_read(&mxts_touch_booster_off_time);
-			queue_delayed_work(system_power_efficient_wq, &data->work_dvfs_off,
+			schedule_delayed_work(&data->work_dvfs_off,
 				msecs_to_jiffies(touch_booster_time));
 		}
 	} else if (on == 1) {
