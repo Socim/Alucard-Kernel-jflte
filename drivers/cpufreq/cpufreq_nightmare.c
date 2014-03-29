@@ -53,6 +53,7 @@ struct cpufreq_nightmare_cpuinfo {
 	struct cpufreq_frequency_table *freq_table;
 	struct delayed_work work;
 	struct cpufreq_policy *cur_policy;
+	ktime_t time_stamp;
 	int cpu;
 	unsigned int enable:1;
 	/*
@@ -546,6 +547,22 @@ static struct attribute_group nightmare_attr_group = {
 
 /************************** sysfs end ************************/
 
+/* Will return if we need to evaluate cpu load again or not */
+static inline bool need_load_eval(struct cpufreq_nightmare_cpuinfo *this_nightmare_cpuinfo,
+		unsigned int sampling_rate)
+{
+	ktime_t time_now = ktime_get();
+	s64 delta_us = ktime_us_delta(time_now, this_nightmare_cpuinfo->time_stamp);
+
+	/* Do nothing if we recently have sampled */
+	if (delta_us < (s64)(sampling_rate / 2))
+		return false;
+	else
+		this_nightmare_cpuinfo->time_stamp = time_now;
+
+	return true;
+}
+
 static void nightmare_check_cpu(struct cpufreq_nightmare_cpuinfo *this_nightmare_cpuinfo)
 {
 	struct cpufreq_policy *cpu_policy;
@@ -569,8 +586,7 @@ static void nightmare_check_cpu(struct cpufreq_nightmare_cpuinfo *this_nightmare
 	cpu = this_nightmare_cpuinfo->cpu;
 	cpu_policy = this_nightmare_cpuinfo->cur_policy;
 
-	cur_idle_time = get_cpu_idle_time_us(cpu, NULL);
-	cur_idle_time += get_cpu_iowait_time_us(cpu, &cur_wall_time);
+	cur_idle_time = get_cpu_idle_time(cpu, &cur_wall_time, 0);
 
 	wall_time = (unsigned int)
 			(cur_wall_time - this_nightmare_cpuinfo->prev_cpu_wall);
@@ -636,6 +652,7 @@ static void nightmare_check_cpu(struct cpufreq_nightmare_cpuinfo *this_nightmare
 static void do_nightmare_timer(struct work_struct *work)
 {
 	struct cpufreq_nightmare_cpuinfo *nightmare_cpuinfo;
+	unsigned int sampling_rate;
 	int delay;
 	unsigned int cpu;
 
@@ -643,14 +660,18 @@ static void do_nightmare_timer(struct work_struct *work)
 	cpu = nightmare_cpuinfo->cpu;
 
 	mutex_lock(&nightmare_cpuinfo->timer_mutex);
-	nightmare_check_cpu(nightmare_cpuinfo);
+
+	sampling_rate = atomic_read(&nightmare_tuners_ins.sampling_rate);
+	delay = usecs_to_jiffies(sampling_rate);
 	/* We want all CPUs to do sampling nearly on
 	 * same jiffy
 	 */
-	delay = usecs_to_jiffies(atomic_read(&nightmare_tuners_ins.sampling_rate));
 	if (num_online_cpus() > 1) {
 		delay -= jiffies % delay;
 	}
+
+	if (need_load_eval(nightmare_cpuinfo, sampling_rate))
+		nightmare_check_cpu(nightmare_cpuinfo);
 
 	queue_delayed_work_on(cpu, system_wq, &nightmare_cpuinfo->work, delay);
 	mutex_unlock(&nightmare_cpuinfo->timer_mutex);
@@ -675,8 +696,7 @@ static int cpufreq_governor_nightmare(struct cpufreq_policy *policy,
 
 		this_nightmare_cpuinfo->cur_policy = policy;
 
-		this_nightmare_cpuinfo->prev_cpu_idle = get_cpu_idle_time_us(cpu, NULL);
-		this_nightmare_cpuinfo->prev_cpu_idle += get_cpu_iowait_time_us(cpu, &this_nightmare_cpuinfo->prev_cpu_wall);
+		this_nightmare_cpuinfo->prev_cpu_idle = get_cpu_idle_time(cpu, &this_nightmare_cpuinfo->prev_cpu_wall, 0);
 
 		this_nightmare_cpuinfo->freq_table = cpufreq_frequency_get_table(cpu);
 		this_nightmare_cpuinfo->cpu = cpu;
@@ -705,13 +725,16 @@ static int cpufreq_governor_nightmare(struct cpufreq_policy *policy,
 
 		mutex_unlock(&nightmare_mutex);
 
+		/* Initiate timer time stamp */
+		this_nightmare_cpuinfo->time_stamp = ktime_get();
+
 		delay=usecs_to_jiffies(atomic_read(&nightmare_tuners_ins.sampling_rate));
 		if (num_online_cpus() > 1) {
 			delay -= jiffies % delay;
 		}
 
 		this_nightmare_cpuinfo->enable = 1;
-		INIT_DELAYED_WORK_DEFERRABLE(&this_nightmare_cpuinfo->work, do_nightmare_timer);
+		INIT_DEFERRABLE_WORK(&this_nightmare_cpuinfo->work, do_nightmare_timer);
 		queue_delayed_work_on(this_nightmare_cpuinfo->cpu, system_wq, &this_nightmare_cpuinfo->work, delay);
 
 		break;
