@@ -48,8 +48,8 @@ struct cpufreq_governor cpufreq_gov_alucard = {
 };
 
 struct cpufreq_alucard_cpuinfo {
-	cputime64_t prev_cpu_wall;
-	cputime64_t prev_cpu_idle;
+	u64 prev_cpu_wall;
+	u64 prev_cpu_idle;
 	struct cpufreq_frequency_table *freq_table;
 	struct delayed_work work;
 	struct cpufreq_policy *cur_policy;
@@ -398,7 +398,7 @@ static void alucard_check_cpu(struct cpufreq_alucard_cpuinfo *this_alucard_cpuin
 	int inc_cpu_load = alucard_tuners_ins.inc_cpu_load;
 	int pump_inc_step = alucard_tuners_ins.pump_inc_step;
 	int pump_dec_step = alucard_tuners_ins.pump_dec_step;
-	cputime64_t cur_wall_time, cur_idle_time;
+	u64 cur_wall_time, cur_idle_time;
 	unsigned int wall_time, idle_time;
 	unsigned int index = 0;
 	unsigned int tmp_freq = 0;
@@ -508,8 +508,6 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 		this_alucard_cpuinfo->freq_table = cpufreq_frequency_get_table(cpu);
 		this_alucard_cpuinfo->cpu = cpu;
 
-		mutex_init(&this_alucard_cpuinfo->timer_mutex);
-
 		alucard_enable++;
 		/*
 		 * Start the timerschedule work, when this governor
@@ -519,10 +517,12 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 			rc = sysfs_create_group(cpufreq_global_kobject,
 						&alucard_attr_group);
 			if (rc) {
+				alucard_enable--;
 				mutex_unlock(&alucard_mutex);
 				return rc;
 			}
 		}
+		mutex_init(&this_alucard_cpuinfo->timer_mutex);
 
 		mutex_unlock(&alucard_mutex);
 
@@ -545,9 +545,9 @@ static int cpufreq_governor_alucard(struct cpufreq_policy *policy,
 		cancel_delayed_work_sync(&this_alucard_cpuinfo->work);
 
 		mutex_lock(&alucard_mutex);
-		alucard_enable--;
 		mutex_destroy(&this_alucard_cpuinfo->timer_mutex);
 
+		alucard_enable--;
 		if (!alucard_enable) {
 			sysfs_remove_group(cpufreq_global_kobject,
 					   &alucard_attr_group);			

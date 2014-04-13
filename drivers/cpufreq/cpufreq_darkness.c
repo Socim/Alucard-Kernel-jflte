@@ -48,8 +48,8 @@ struct cpufreq_governor cpufreq_gov_darkness = {
 };
 
 struct cpufreq_darkness_cpuinfo {
-	cputime64_t prev_cpu_wall;
-	cputime64_t prev_cpu_idle;
+	u64 prev_cpu_wall;
+	u64 prev_cpu_idle;
 	struct cpufreq_frequency_table *freq_table;
 	struct delayed_work work;
 	struct cpufreq_policy *cur_policy;
@@ -207,7 +207,7 @@ static void darkness_check_cpu(struct cpufreq_darkness_cpuinfo *this_darkness_cp
 	struct cpufreq_policy *cpu_policy;
 	unsigned int min_freq;
 	unsigned int max_freq;
-	cputime64_t cur_wall_time, cur_idle_time;
+	u64 cur_wall_time, cur_idle_time;
 	unsigned int wall_time, idle_time;
 	unsigned int index = 0;
 	unsigned int next_freq = 0;
@@ -311,8 +311,6 @@ static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 		this_darkness_cpuinfo->freq_table = cpufreq_frequency_get_table(cpu);
 		this_darkness_cpuinfo->cpu = cpu;
 
-		mutex_init(&this_darkness_cpuinfo->timer_mutex);
-
 		darkness_enable++;
 		/*
 		 * Start the timerschedule work, when this governor
@@ -322,10 +320,12 @@ static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 			rc = sysfs_create_group(cpufreq_global_kobject,
 						&darkness_attr_group);
 			if (rc) {
+				darkness_enable--;
 				mutex_unlock(&darkness_mutex);
 				return rc;
 			}
 		}
+		mutex_init(&this_darkness_cpuinfo->timer_mutex);
 
 		mutex_unlock(&darkness_mutex);
 
@@ -348,9 +348,9 @@ static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 		cancel_delayed_work_sync(&this_darkness_cpuinfo->work);
 
 		mutex_lock(&darkness_mutex);
-		darkness_enable--;
 		mutex_destroy(&this_darkness_cpuinfo->timer_mutex);
 
+		darkness_enable--;
 		if (!darkness_enable) {
 			sysfs_remove_group(cpufreq_global_kobject,
 					   &darkness_attr_group);			
