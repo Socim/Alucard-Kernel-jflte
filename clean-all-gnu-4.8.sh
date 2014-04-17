@@ -1,7 +1,7 @@
 #!/bin/bash
 
 cp -pv .config .config.bkp;
-make ARCH=arm CROSS_COMPILE=../arm-cortex_a15-linux-gnueabihf-linaro_4.8.3-2014.03/bin/arm-gnueabi- mrproper;
+make ARCH=arm CROSS_COMPILE=../arm-cortex_a15-linux-gnueabihf-linaro_4.8.3-2014.04/bin/arm-gnueabi- mrproper;
 cp -pv .config.bkp .config;
 make clean && make mrproper;
 rm -rf ./kernel/usr;
