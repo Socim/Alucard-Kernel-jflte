@@ -41,9 +41,6 @@ static struct hotplug_cpuinfo {
 	u64 prev_cpu_wall;
 	u64 prev_cpu_idle;
 	int cpu;
-	int online;
-	int cur_load;
-	int cur_freq;
 	int hotplugging_rate;
 	struct delayed_work work;
 	struct mutex timer_mutex;
@@ -256,9 +253,6 @@ static bool hotplug_work_fn(struct hotplug_cpuinfo *this_hotplug_cpuinfo)
 	if (!cpu_online(cpu))
 		return false;
 		
-	if (online != this_hotplug_cpuinfo->online)
-		this_hotplug_cpuinfo->online = online;
-
 	/* set hotplugging_rate used */
 	++this_hotplug_cpuinfo->hotplugging_rate;
 	check_up = (this_hotplug_cpuinfo->hotplugging_rate % up_rate == 0);
@@ -301,9 +295,6 @@ static bool hotplug_work_fn(struct hotplug_cpuinfo *this_hotplug_cpuinfo)
 		
 		cur_freq = acpuclk_get_rate(cpu);
 
-		this_hotplug_cpuinfo->cur_load = cur_load;
-		this_hotplug_cpuinfo->cur_freq = cur_freq;
-		
 		up_load = hotplug_load[cpu][UP_INDEX];
 		down_load = hotplug_load[cpu][DOWN_INDEX];
 		up_freq = hotplug_freq[cpu][UP_INDEX];
@@ -325,14 +316,12 @@ static bool hotplug_work_fn(struct hotplug_cpuinfo *this_hotplug_cpuinfo)
 			&& cur_freq >= up_freq
 			&& rq_avg > up_rq) {
 				if (!cpu_online(ref_cpu)) {
+					ref_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, ref_cpu);
+					delay = msecs_to_jiffies(sampling_rate);
 					ret = cpu_up(ref_cpu);
 					if (!ret) {
-						ref_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, ref_cpu);
-						ref_hotplug_cpuinfo->online = true;
-						ref_hotplug_cpuinfo->hotplugging_rate = 0;
-						delay = msecs_to_jiffies(sampling_rate);
 						queue_delayed_work_on(ref_cpu, alucardhp_wq, &ref_hotplug_cpuinfo->work, delay);
-						pr_info("HOTPLUG IN CPU[%u], online[%d], cur_load[%d], cur_freq[%d]\n", ref_cpu, 1, cur_load, cur_freq);
+						pr_info("HOTPLUG IN CPU[%u], cur_load[%d], cur_freq[%d], rq_avg[%d]\n", ref_cpu, cur_load, cur_freq, rq_avg);
 					}
 				}
 		}
@@ -344,7 +333,7 @@ static bool hotplug_work_fn(struct hotplug_cpuinfo *this_hotplug_cpuinfo)
 					|| (cur_freq <= down_freq
 					&& rq_avg <= down_rq)) {
 						online = false;
-						pr_info("HOTPLUG OUT CPU[%u], online[%d], cur_load[%d], cur_freq[%d]\n", cpu, 0, cur_load, cur_freq);
+						pr_info("HOTPLUG OUT CPU[%u], cur_load[%d], cur_freq[%d], rq_avg[%d]\n", cpu, cur_load, cur_freq, rq_avg);
 			}
 		}
 	}
@@ -353,7 +342,7 @@ static bool hotplug_work_fn(struct hotplug_cpuinfo *this_hotplug_cpuinfo)
 		this_hotplug_cpuinfo->hotplugging_rate = 0;
 	}
 	
-	return (online);
+	return online;
 }
 
 static void __cpuinit hotplug_timer_fn(struct work_struct *work)
@@ -382,9 +371,9 @@ static void __cpuinit hotplug_timer_fn(struct work_struct *work)
 		if (cpu > 0) {
 			ret = cpu_down(cpu);
 			if (!ret) {
-				cpu_hotplug_cpuinfo->online = false;
 				mutex_unlock(&cpu_hotplug_cpuinfo->timer_mutex);
 				cancel_delayed_work(&cpu_hotplug_cpuinfo->work);
+				cpu_hotplug_cpuinfo->hotplugging_rate = 0;
 				return;
 			}
 		}
@@ -395,10 +384,7 @@ static void __cpuinit hotplug_timer_fn(struct work_struct *work)
 static void hotplug_start(int io_busy)
 {
 	unsigned int cpu;
-	int ret;
 	int delay = msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate);
-
-	mutex_lock(&alucardhp_mutex);
 
 #if 0
 	/* Initiate timer time stamp */
@@ -409,8 +395,9 @@ static void hotplug_start(int io_busy)
 	
 	for_each_possible_cpu(cpu) {
 		struct hotplug_cpuinfo *cpu_hotplug_cpuinfo;
+		int ret = 0;
 
-		if (cpu > 0) {
+		if (cpu > 0 && cpu_online(cpu)) {
 			ret = cpu_down(cpu);
 		}
 
@@ -420,39 +407,32 @@ static void hotplug_start(int io_busy)
 				&cpu_hotplug_cpuinfo->prev_cpu_wall, io_busy);
 
 		cpu_hotplug_cpuinfo->cpu = cpu;
-		cpu_hotplug_cpuinfo->online = cpu_online(cpu);
 		cpu_hotplug_cpuinfo->hotplugging_rate = 0;
 
 		mutex_init(&cpu_hotplug_cpuinfo->timer_mutex);
 
-		INIT_DELAYED_WORK(&cpu_hotplug_cpuinfo->work, hotplug_timer_fn);
+		INIT_DEFERRABLE_WORK(&cpu_hotplug_cpuinfo->work, hotplug_timer_fn);
 		if (cpu == 0 || ret) {
 			queue_delayed_work_on(cpu, alucardhp_wq, &cpu_hotplug_cpuinfo->work,
 				delay);
 		}
 	}
-
-	mutex_unlock(&alucardhp_mutex);
 }
 
 static void hotplug_stop(void)
 {
 	unsigned int cpu;
 
-	mutex_lock(&alucardhp_mutex);
-
 	for_each_possible_cpu(cpu) {
 		struct hotplug_cpuinfo *cpu_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, cpu);
 
 		cancel_delayed_work_sync(&cpu_hotplug_cpuinfo->work);
 
-		if (cpu > 0)
+		if (cpu > 0 && cpu_online(cpu))
 			cpu_down(cpu);
 
 		mutex_destroy(&cpu_hotplug_cpuinfo->timer_mutex);
 	}
-
-	mutex_unlock(&alucardhp_mutex);
 }
 
 #if defined(CONFIG_POWERSUSPEND) || defined(CONFIG_HAS_EARLYSUSPEND)
@@ -470,16 +450,16 @@ static void __ref alucard_hotplug_early_suspend(struct early_suspend *handler)
 			atomic_read(&hotplug_tuners_ins.maxcoreslimit_sleep);
 
 		/* put rest of the cores to sleep! */
-		for (i = num_possible_cpus() - 1; i >=
-				maxcoreslimit_sleep; i--) {
+		for (i = maxcoreslimit_sleep; i <
+				num_possible_cpus(); i++) {
 			struct hotplug_cpuinfo *this_hotplug_cpuinfo;
 			int ret = 0;
 			if (cpu_online(i)) {
+				this_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, i);
 				ret = cpu_down(i);
 				if (!ret) {
-					this_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, i);
 					cancel_delayed_work_sync(&this_hotplug_cpuinfo->work);
-					this_hotplug_cpuinfo->online = false;
+					this_hotplug_cpuinfo->hotplugging_rate = 0;
 				}
 			}
 		}
@@ -505,19 +485,15 @@ static void __cpuinit alucard_hotplug_late_resume(
 		/* wake up everyone */
 		maxcoreslimit = atomic_read(&hotplug_tuners_ins.maxcoreslimit);
 
-		flush_workqueue(alucardhp_wq);
-
-		for (i = 1; i < maxcoreslimit; i++) {
+		for (i = maxcoreslimit - 1; i >= 1; i--) {
 			struct hotplug_cpuinfo *this_hotplug_cpuinfo;
 			int ret = 0;
 			if (!cpu_online(i)) {
+				this_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, i);
 				ret = cpu_up(i);
 				if (!ret) {
-					this_hotplug_cpuinfo = &per_cpu(od_hotplug_cpuinfo, i);
 					if (delayed_work_pending(&this_hotplug_cpuinfo->work))
 						cancel_delayed_work_sync(&this_hotplug_cpuinfo->work);
-					this_hotplug_cpuinfo->online = true;
-					this_hotplug_cpuinfo->hotplugging_rate = 0;
 					queue_delayed_work_on(i, alucardhp_wq, &this_hotplug_cpuinfo->work,
 											delay);
 				}
