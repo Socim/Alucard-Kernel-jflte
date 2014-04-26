@@ -1814,6 +1814,13 @@ config ALUCARD_HOTPLUG
 	help
 	  Generic Alucard-hotplug cpu hotplug driver for ARM SOCs
 
+config ALUCARD_HOTPLUG_THERMAL
+	bool "Enable alucard-hotplug thermal control"
+	depends on ALUCARD_HOTPLUG
+	default n
+	help
+	  Alucard-hotplug thermal control
+
 config CPU_VOLTAGE_TABLE
 	bool "Enable CPU Voltage Table via sysfs for adjustements"
 	default n
@@ -2858,5 +2865,12 @@ config FORCE_FAST_CHARGE
 	  A simple sysfs interface to force adapters that
 	  are detected as USB to charge as AC (1A/h) or to set
 	  custom charging currents for AC and USB.
+
+config CPUFREQ_LIMIT_MANAGER
+	bool "CPUFREQ limitter for suspend, gps, oncall using"
+	default n
+	help
+	  A simple sysfs interface to limit cpufreq,
+	  when using gps, or call or suspend.
 
 endif
