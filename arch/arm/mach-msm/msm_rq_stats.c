@@ -42,9 +42,13 @@ struct notifier_block cpu_hotplug;
 struct notifier_block freq_policy;
 
 struct cpu_load_data {
+#ifdef CONFIG_MSM_RUN_QUEUE_STATS_USE_CPU_UTIL
+	u64 prev_cpu_wall;
+#else
 	u64 prev_cpu_idle;
 	u64 prev_cpu_wall;
 	u64 prev_cpu_iowait;
+#endif
 	unsigned int avg_load_maxfreq;
 	unsigned int samples;
 	unsigned int window_size;
@@ -71,10 +75,22 @@ static int update_average_load(unsigned int freq, unsigned int cpu)
 {
 
 	struct cpu_load_data *pcpu = &per_cpu(cpuload, cpu);
+#ifdef CONFIG_MSM_RUN_QUEUE_STATS_USE_CPU_UTIL
+	u64 cur_wall_time;
+	unsigned int wall_time;
+#else
 	u64 cur_wall_time, cur_idle_time, cur_iowait_time;
 	unsigned int idle_time, wall_time, iowait_time;
+#endif
 	unsigned int cur_load, load_at_max_freq;
 
+#ifdef CONFIG_MSM_RUN_QUEUE_STATS_USE_CPU_UTIL
+	cur_wall_time = ktime_to_us(ktime_get());
+	wall_time = (unsigned int) (cur_wall_time - pcpu->prev_cpu_wall);
+	pcpu->prev_cpu_wall = cur_wall_time;
+
+	cur_load = cpufreq_quick_get_util(cpu);
+#else
 	cur_idle_time = get_cpu_idle_time(cpu, &cur_wall_time, 0);
 	cur_iowait_time = get_cpu_iowait_time(cpu, &cur_wall_time);
 
@@ -94,6 +110,7 @@ static int update_average_load(unsigned int freq, unsigned int cpu)
 		return 0;
 
 	cur_load = 100 * (wall_time - idle_time) / wall_time;
+#endif
 
 	/* Calculate the scaled load across CPU */
 	load_at_max_freq = (cur_load * freq) / pcpu->policy_max;
@@ -389,6 +406,9 @@ static int __init msm_rq_stats_init(void)
 			pcpu->cur_freq = acpuclk_get_rate(i);
 #endif
 		cpumask_copy(pcpu->related_cpus, cpu_policy.cpus);
+#ifdef CONFIG_MSM_RUN_QUEUE_STATS_USE_CPU_UTIL
+		pcpu->prev_cpu_wall = ktime_to_us(ktime_get());
+#endif
 	}
 	freq_transition.notifier_call = cpufreq_transition_handler;
 	cpu_hotplug.notifier_call = cpu_hotplug_handler;

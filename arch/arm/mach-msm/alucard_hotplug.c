@@ -22,7 +22,7 @@
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 #include <linux/msm_tsens.h>
 #endif
 #include "acpuclock.h"
@@ -40,8 +40,10 @@ static struct workqueue_struct *alucardhp_wq;
 static ktime_t time_stamp;
 #endif
 static struct hotplug_cpuinfo {
+#ifndef CONFIG_ALUCARD_HOTPLUG_USE_CPU_UTIL
 	u64 prev_cpu_wall;
 	u64 prev_cpu_idle;
+#endif
 	int online;
 	int up_cpu;
 	int up_by_cpu;
@@ -58,7 +60,7 @@ static struct hotplug_tuners {
 	int cpu_down_rate;
 	atomic_t maxcoreslimit;
 	atomic_t maxcoreslimit_sleep;
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	atomic_t core_thermal_enable;
 #endif
 } hotplug_tuners_ins = {
@@ -68,12 +70,12 @@ static struct hotplug_tuners {
 	.cpu_down_rate = 10,
 	.maxcoreslimit = ATOMIC_INIT(NR_CPUS),
 	.maxcoreslimit_sleep = ATOMIC_INIT(1),
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	.core_thermal_enable = ATOMIC_INIT(0),
 #endif
 };
 
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 static atomic_t core_thermal_lock = ATOMIC_INIT(0);
 
 static struct core_thermal_data {
@@ -191,12 +193,15 @@ static int hotplug_rq[4][2] = {
 	{300, 0}
 };
 
+#ifndef CONFIG_ALUCARD_HOTPLUG_USE_CPU_UTIL
 static inline int get_cpu_load(unsigned int cpu, int io_busy)
 {
-	struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
+	struct hotplug_cpuinfo *pcpu_info;
 	u64 cur_wall_time, cur_idle_time;
 	unsigned int wall_time, idle_time;
 	int cur_load = -1;
+
+	pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
 
 	cur_idle_time = get_cpu_idle_time(cpu, &cur_wall_time, io_busy);
 
@@ -222,8 +227,9 @@ static inline int get_cpu_load(unsigned int cpu, int io_busy)
 
 	return cur_load;
 }
+#endif
 
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 static inline int do_core_control(int online, int num_cores_limit)
 {
 	struct tsens_device tsens_dev;
@@ -275,7 +281,7 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 	int i = 0;
 	int online_cpus = 0;
 	unsigned int rq_avg = 0;
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	int core_thermal_enable = 0;
 #endif
 	int delay;
@@ -300,7 +306,7 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 
 	get_online_cpus();
 	online_cpus = num_online_cpus();
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	core_thermal_enable = atomic_read(
 			&hotplug_tuners_ins.core_thermal_enable);
 
@@ -314,7 +320,9 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 				cpu, rq_avg);
 #endif
 	for_each_cpu_not(cpu, cpu_online_mask) {
-		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
+		struct hotplug_cpuinfo *pcpu_info;
+
+		pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
 
 		cpus_off[idx_off] = cpu;
 		++idx_off;
@@ -327,7 +335,7 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 	}
 
 	for_each_online_cpu(cpu) {
-		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
+		struct hotplug_cpuinfo *pcpu_info;
 		int up_load;
 		int down_load;
 		unsigned int up_freq;
@@ -337,7 +345,13 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 		int cur_load = -1;
 		unsigned int cur_freq = 0;
 
+#ifdef CONFIG_ALUCARD_HOTPLUG_USE_CPU_UTIL
+		cur_load = cpufreq_quick_get_util(cpu);
+#else
 		cur_load = get_cpu_load(cpu, 0);
+#endif
+
+		pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
 
 		/* if cur_load < 0, evaluate cpu load next time */
 		if (cur_load >= 0) {
@@ -411,9 +425,12 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 
 	if (offline_cpu > 0) {
 		for (i = 0; i < offline_cpu; i++) {
-			struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpus_off[i]);
+			struct hotplug_cpuinfo *pcpu_info;
 			int ret = 0;
 			int refcpu = -1;
+
+			pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpus_off[i]);
+
 			if (pcpu_info->online == true) {
 				ret = cpu_up(cpus_off[i]);
 				if (!ret) {
@@ -435,9 +452,12 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 
 	if (online_cpu > 0) {
 		for (i = 0; i < online_cpu; i++) {
-			struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpus_on[i]);
+			struct hotplug_cpuinfo *pcpu_info;
 			int ret = 0;
 			int refcpu = -1;
+
+			pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpus_on[i]);
+
 			if (pcpu_info->online == false) {
 				ret = cpu_down(cpus_on[i]);
 				if (!ret) {
@@ -459,7 +479,8 @@ static void __cpuinit hotplug_work_fn(struct work_struct *work)
 
 	get_online_cpus();
 	if (num_online_cpus() == 1) {
-		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, 0);
+		struct hotplug_cpuinfo *pcpu_info;
+		pcpu_info = &per_cpu(od_hotplug_cpuinfo, 0);
 		pcpu_info->up_cpu = -1;
 	}
 	put_online_cpus();
@@ -495,7 +516,7 @@ static void __cpuinit alucard_hotplug_late_resume(
 	int i = 0;
 	int prev_online = 0;
 
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	if (atomic_read(&hotplug_tuners_ins.hotplug_enable) > 0 &&
 			atomic_read(&core_thermal_lock) == 0) {
 #else
@@ -508,8 +529,11 @@ static void __cpuinit alucard_hotplug_late_resume(
 		atomic_set(&suspended, 0);
 
 		for (i = 1; i < maxcoreslimit; i++) {
-			struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, i);
+			struct hotplug_cpuinfo *pcpu_info;
 			int ret = 0;
+
+			pcpu_info = &per_cpu(od_hotplug_cpuinfo, i);
+
 			if (!cpu_online(i)) {
 				ret = cpu_up(i);
 				if (!ret) {
@@ -565,10 +589,14 @@ static int hotplug_start(void)
 
 	get_online_cpus();
 	for_each_possible_cpu(cpu) {
-		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
+		struct hotplug_cpuinfo *pcpu_info;
 
+		pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
+
+#ifndef CONFIG_ALUCARD_HOTPLUG_USE_CPU_UTIL
 		pcpu_info->prev_cpu_idle = get_cpu_idle_time(cpu,
 				&pcpu_info->prev_cpu_wall, 0);
+#endif
 
 		pcpu_info->online = cpu_online(cpu);
 
@@ -577,7 +605,7 @@ static int hotplug_start(void)
 
 		hotplugging_rate = 0;
 
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 		/* Initial thermal core control */
 		atomic_set(&core_thermal_lock, 0);
 		core_thermal_info.num_cores = num_possible_cpus();
@@ -643,7 +671,7 @@ show_one(cpu_up_rate, cpu_up_rate);
 show_one(cpu_down_rate, cpu_down_rate);
 show_atomic(maxcoreslimit, maxcoreslimit);
 show_atomic(maxcoreslimit_sleep, maxcoreslimit_sleep);
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 show_atomic(core_thermal_enable, core_thermal_enable);
 #endif
 
@@ -940,7 +968,7 @@ static ssize_t store_maxcoreslimit_sleep(struct kobject *a,
 	return count;
 }
 
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 /* core_thermal_enable */
 static ssize_t store_core_thermal_enable(struct kobject *a,
 				struct attribute *b,
@@ -970,7 +998,7 @@ define_one_global_rw(cpu_up_rate);
 define_one_global_rw(cpu_down_rate);
 define_one_global_rw(maxcoreslimit);
 define_one_global_rw(maxcoreslimit_sleep);
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 define_one_global_rw(core_thermal_enable);
 #endif
 
@@ -1005,7 +1033,7 @@ static struct attribute *alucard_hotplug_attributes[] = {
 	&cpu_down_rate.attr,
 	&maxcoreslimit.attr,
 	&maxcoreslimit_sleep.attr,
-#ifdef ALUCARD_HOTPLUG_THERMAL
+#ifdef CONFIG_ALUCARD_HOTPLUG_THERMAL
 	&core_thermal_enable.attr,
 #endif
 	NULL
