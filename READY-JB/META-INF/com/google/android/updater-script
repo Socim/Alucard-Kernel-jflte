@@ -13,7 +13,7 @@ ui_print("                                          ");
 ui_print("------------------------------------------");
 ui_print("");
 
-mount("ext4", "EMMC", "/dev/block/platform/msm_sdcc.1/by-name/system", "/system");
+run_program("/sbin/busybox", "mount", "/system");
 
 # ---- Flash the kernel ----
 ui_print("");
@@ -25,4 +25,5 @@ set_metadata_recursive("/system/lib/modules", "uid", 0, "gid", 0, "dmode", 0755,
 set_metadata("/system/xbin/ntfs-3g", "uid", 0, "gid", 0, "mode", 06755, "capabilities", 0x0, "selabel", "u:object_r:system_file:s0");
 package_extract_file("boot.img", "/dev/block/platform/msm_sdcc.1/by-name/boot");
 ui_print("Kernel successfully installed");
+unmount("/system");
 show_progress(0.100000, 0);
