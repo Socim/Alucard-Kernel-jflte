@@ -34,7 +34,7 @@
  * re-allowed until epoll_wait is called again after consuming the wakeup
  * event(s).
  *
- * Requires CAP_EPOLLWAKEUP
+ * Requires CAP_BLOCK_SUSPEND
  */
 #define EPOLLWAKEUP (1 << 29)
 
@@ -60,6 +60,19 @@ struct epoll_event {
 	__u32 events;
 	__u64 data;
 } EPOLL_PACKED;
+
+#ifdef CONFIG_PM_SLEEP
+static inline void ep_take_care_of_epollwakeup(struct epoll_event *epev)
+{
+	if ((epev->events & EPOLLWAKEUP) && !capable(CAP_BLOCK_SUSPEND))
+		epev->events &= ~EPOLLWAKEUP;
+}
+#else
+static inline void ep_take_care_of_epollwakeup(struct epoll_event *epev)
+{
+	epev->events &= ~EPOLLWAKEUP;
+}
+#endif
 
 #ifdef __KERNEL__
 

@@ -137,7 +137,7 @@ extern int get_soft_reclaim_status(void);
 /*
  * From 0 .. 100.  Higher means more swappy.
  */
-int vm_swappiness = 0; // we have 2GB ram, so we disable swappiness at all
+int vm_swappiness = 60;
 long vm_total_pages;	/* The total number of pages which the VM controls */
 
 static LIST_HEAD(shrinker_list);
@@ -2692,7 +2692,7 @@ loop_again:
 			if (has_under_min_watermark_zone)
 				count_vm_event(KSWAPD_SKIP_CONGESTION_WAIT);
 			else
-				congestion_wait(BLK_RW_ASYNC, HZ/60);
+				congestion_wait_kswapd(BLK_RW_ASYNC, HZ/60);
 		}
 
 		/*

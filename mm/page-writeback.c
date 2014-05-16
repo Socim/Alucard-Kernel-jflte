@@ -34,7 +34,10 @@
 #include <linux/syscalls.h>
 #include <linux/buffer_head.h> /* __set_page_dirty_buffers */
 #include <linux/pagevec.h>
+#include <linux/mm_inline.h>
+#include <linux/timer.h>
 #include <trace/events/writeback.h>
+#include <linux/earlysuspend.h>
 
 /*
  * Sleep at most 200ms at a time in balance_dirty_pages().
@@ -93,14 +96,24 @@ unsigned long vm_dirty_bytes;
 /*
  * The interval between `kupdate'-style writebacks
  */
-unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
+#define DEFAULT_DIRTY_WRITEBACK_INTERVAL 600 /* centiseconds */
+#define DEFAULT_SUSPEND_DIRTY_WRITEBACK_INTERVAL 6000 /* centiseconds */
+unsigned int dirty_writeback_interval,
+	resume_dirty_writeback_interval;
+unsigned int sleep_dirty_writeback_interval,
+	suspend_dirty_writeback_interval;
 
 EXPORT_SYMBOL_GPL(dirty_writeback_interval);
 
 /*
  * The longest time for which data is allowed to remain dirty
  */
-unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
+#define DEFAULT_DIRTY_EXPIRE_INTERVAL 3000 /* centiseconds */
+#define DEFAULT_SUSPEND_DIRTY_EXPIRE_INTERVAL 12000 /* centiseconds */
+unsigned int dirty_expire_interval,
+	resume_dirty_expire_interval;
+unsigned int sleep_dirty_expire_interval,
+	suspend_dirty_expire_interval;
 
 /*
  * Flag that makes the machine dump writes/reads and block dirtyings.
@@ -135,7 +148,20 @@ unsigned long global_dirty_limit;
  * measured in page writeback completions.
  *
  */
-static struct prop_descriptor vm_completions;
+static struct fprop_global writeout_completions;
+
+static void writeout_period(unsigned long t);
+/* Timer for aging of writeout_completions */
+static struct timer_list writeout_period_timer =
+		TIMER_DEFERRED_INITIALIZER(writeout_period, 0, 0);
+static unsigned long writeout_period_time = 0;
+
+/*
+ * Length of period for aging writeout fractions of bdis. This is an
+ * arbitrarily chosen number. The longer the period, the slower fractions will
+ * reflect changes in current writeout rate.
+ */
+#define VM_COMPLETIONS_PERIOD_LEN (3*HZ)
 
 /*
  * Work out the current dirty-memory clamping and background writeout
@@ -233,7 +259,7 @@ static unsigned long highmem_dirtyable_memory(unsigned long total)
  * Returns the global number of pages potentially available for dirty
  * page cache.  This is the base value for the global dirty limits.
  */
-unsigned long global_dirtyable_memory(void)
+static unsigned long global_dirtyable_memory(void)
 {
 	unsigned long x;
 
@@ -330,34 +356,6 @@ bool zone_dirty_ok(struct zone *zone)
 	       zone_page_state(zone, NR_WRITEBACK) <= limit;
 }
 
-/*
- * couple the period to the dirty_ratio:
- *
- *   period/2 ~ roundup_pow_of_two(dirty limit)
- */
-static int calc_period_shift(void)
-{
-	unsigned long dirty_total;
-
-	if (vm_dirty_bytes)
-		dirty_total = vm_dirty_bytes / PAGE_SIZE;
-	else
-		dirty_total = (vm_dirty_ratio * global_dirtyable_memory()) /
-				100;
-	return 2 + ilog2(dirty_total - 1);
-}
-
-/*
- * update the period when the dirty threshold changes.
- */
-static void update_completion_period(void)
-{
-	int shift = calc_period_shift();
-	prop_change_shift(&vm_completions, shift);
-
-	writeback_set_ratelimit();
-}
-
 int dirty_background_ratio_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos)
@@ -391,7 +389,7 @@ int dirty_ratio_handler(struct ctl_table *table, int write,
 
 	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 	if (ret == 0 && write && vm_dirty_ratio != old_ratio) {
-		update_completion_period();
+		writeback_set_ratelimit();
 		vm_dirty_bytes = 0;
 	}
 	return ret;
@@ -406,10 +404,19 @@ int dirty_bytes_handler(struct ctl_table *table, int write,
 
 	ret = proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 	if (ret == 0 && write && vm_dirty_bytes != old_bytes) {
-		update_completion_period();
+		writeback_set_ratelimit();
 		vm_dirty_ratio = 0;
 	}
 	return ret;
+}
+
+static unsigned long wp_next_time(unsigned long cur_time)
+{
+	cur_time += VM_COMPLETIONS_PERIOD_LEN;
+	/* 0 has a special meaning... */
+	if (!cur_time)
+		return 1;
+	return cur_time;
 }
 
 /*
@@ -419,8 +426,19 @@ int dirty_bytes_handler(struct ctl_table *table, int write,
 static inline void __bdi_writeout_inc(struct backing_dev_info *bdi)
 {
 	__inc_bdi_stat(bdi, BDI_WRITTEN);
-	__prop_inc_percpu_max(&vm_completions, &bdi->completions,
-			      bdi->max_prop_frac);
+	__fprop_inc_percpu_max(&writeout_completions, &bdi->completions,
+			       bdi->max_prop_frac);
+	/* First event after period switching was turned off? */
+	if (!unlikely(writeout_period_time)) {
+		/*
+		 * We can race with other __bdi_writeout_inc calls here but
+		 * it does not cause any harm since the resulting time when
+		 * timer will fire and what is in writeout_period_time will be
+		 * roughly the same.
+		 */
+		writeout_period_time = wp_next_time(jiffies);
+		mod_timer(&writeout_period_timer, writeout_period_time);
+	}
 }
 
 void bdi_writeout_inc(struct backing_dev_info *bdi)
@@ -439,8 +457,30 @@ EXPORT_SYMBOL_GPL(bdi_writeout_inc);
 static void bdi_writeout_fraction(struct backing_dev_info *bdi,
 		long *numerator, long *denominator)
 {
-	prop_fraction_percpu(&vm_completions, &bdi->completions,
+	fprop_fraction_percpu(&writeout_completions, &bdi->completions,
 				numerator, denominator);
+}
+
+/*
+ * On idle system, we can be called long after we scheduled because we use
+ * deferred timers so count with missed periods.
+ */
+static void writeout_period(unsigned long t)
+{
+	int miss_periods = (jiffies - writeout_period_time) /
+						 VM_COMPLETIONS_PERIOD_LEN;
+
+	if (fprop_new_period(&writeout_completions, miss_periods + 1)) {
+		writeout_period_time = wp_next_time(writeout_period_time +
+				miss_periods * VM_COMPLETIONS_PERIOD_LEN);
+		mod_timer(&writeout_period_timer, writeout_period_time);
+	} else {
+		/*
+		 * Aging has zeroed all fractions. Stop wasting CPU on period
+		 * updates.
+		 */
+		writeout_period_time = 0;
+	}
 }
 
 /*
@@ -483,7 +523,7 @@ int bdi_set_max_ratio(struct backing_dev_info *bdi, unsigned max_ratio)
 		ret = -EINVAL;
 	} else {
 		bdi->max_ratio = max_ratio;
-		bdi->max_prop_frac = (PROP_FRAC_BASE * max_ratio) / 100;
+		bdi->max_prop_frac = (FPROP_FRAC_BASE * max_ratio) / 100;
 	}
 	spin_unlock_bh(&bdi_lock);
 
@@ -926,7 +966,7 @@ static void bdi_update_dirty_ratelimit(struct backing_dev_info *bdi,
 	 *	bdi->dirty_ratelimit = balanced_dirty_ratelimit;
 	 *
 	 * However to get a more stable dirty_ratelimit, the below elaborated
-	 * code makes use of task_ratelimit to filter out sigular points and
+	 * code makes use of task_ratelimit to filter out singular points and
 	 * limit the step size.
 	 *
 	 * The below code essentially only uses the relative value of
@@ -949,7 +989,7 @@ static void bdi_update_dirty_ratelimit(struct backing_dev_info *bdi,
 	 * feel and care are stable dirty rate and small position error.
 	 *
 	 * |task_ratelimit - dirty_ratelimit| is used to limit the step size
-	 * and filter out the sigular points of balanced_dirty_ratelimit. Which
+	 * and filter out the singular points of balanced_dirty_ratelimit. Which
 	 * keeps jumping around randomly and can even leap far away at times
 	 * due to the small 200ms estimation period of dirty_rate (we want to
 	 * keep that period small to reduce time lags).
@@ -1575,6 +1615,7 @@ void writeback_set_ratelimit(void)
 	unsigned long background_thresh;
 	unsigned long dirty_thresh;
 	global_dirty_limits(&background_thresh, &dirty_thresh);
+	global_dirty_limit = dirty_thresh;
 	ratelimit_pages = dirty_thresh / (num_online_cpus() * 32);
 	if (ratelimit_pages < 16)
 		ratelimit_pages = 16;
@@ -1600,6 +1641,24 @@ static struct notifier_block __cpuinitdata ratelimit_nb = {
 	.next		= NULL,
 };
 
+static void dirty_early_suspend(struct early_suspend *handler)
+{
+	dirty_writeback_interval = suspend_dirty_writeback_interval;
+	dirty_expire_interval = suspend_dirty_expire_interval;
+}
+
+static void dirty_late_resume(struct early_suspend *handler)
+{
+	dirty_writeback_interval = resume_dirty_writeback_interval;
+	dirty_expire_interval = resume_dirty_expire_interval;
+}
+
+static struct early_suspend dirty_suspend = {
+	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 10,
+	.suspend = dirty_early_suspend,
+	.resume = dirty_late_resume,
+};
+
 /*
  * Called early on to tune the page writeback dirty limits.
  *
@@ -1620,13 +1679,21 @@ static struct notifier_block __cpuinitdata ratelimit_nb = {
  */
 void __init page_writeback_init(void)
 {
-	int shift;
+	dirty_writeback_interval = resume_dirty_writeback_interval =
+		DEFAULT_DIRTY_WRITEBACK_INTERVAL;
+	dirty_expire_interval = resume_dirty_expire_interval =
+		DEFAULT_DIRTY_EXPIRE_INTERVAL;
+	sleep_dirty_writeback_interval = suspend_dirty_writeback_interval =
+		DEFAULT_SUSPEND_DIRTY_WRITEBACK_INTERVAL;
+	sleep_dirty_expire_interval = suspend_dirty_expire_interval =
+		DEFAULT_SUSPEND_DIRTY_EXPIRE_INTERVAL;
+
+	register_early_suspend(&dirty_suspend);
 
 	writeback_set_ratelimit();
 	register_cpu_notifier(&ratelimit_nb);
 
-	shift = calc_period_shift();
-	prop_descriptor_init(&vm_completions, shift);
+	fprop_global_init(&writeout_completions);
 }
 
 /**
