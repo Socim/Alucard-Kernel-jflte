@@ -29,12 +29,15 @@
 struct cpu_sync {
 	struct delayed_work boost_rem;
 	struct delayed_work input_boost_rem;
+	struct delayed_work plug_boost_rem;
 	int cpu;
 	spinlock_t lock;
 	bool pending;
 	int src_cpu;
 	unsigned int boost_min;
 	unsigned int input_boost_min;
+	unsigned int plug_boost_min;
+	unsigned int task_load;
 };
 
 static DEFINE_PER_CPU(struct cpu_sync, sync_info);
@@ -42,6 +45,7 @@ static DEFINE_PER_CPU(struct task_struct *, thread);
 static struct workqueue_struct *cpu_boost_wq;
 
 static struct work_struct input_boost_work;
+static struct work_struct plug_boost_work;
 
 static unsigned int boost_ms = 40;
 module_param(boost_ms, uint, 0644);
@@ -54,6 +58,18 @@ module_param(input_boost_freq, uint, 0644);
 
 static unsigned int input_boost_ms = 40;
 module_param(input_boost_ms, uint, 0644);
+
+static unsigned int migration_load_threshold = 15;
+module_param(migration_load_threshold, uint, 0644);
+
+static bool load_based_syncs;
+module_param(load_based_syncs, bool, 0644);
+
+static unsigned int plug_boost_freq;
+module_param(plug_boost_freq, uint, 0644);
+
+static unsigned int plug_boost_ms = 40;
+module_param(plug_boost_ms, uint, 0644);
 
 #define MIN_INPUT_INTERVAL (150 * USEC_PER_MSEC)
 
@@ -76,15 +92,16 @@ static int boost_adjust_notify(struct notifier_block *nb, unsigned long val, voi
 	struct cpu_sync *s = &per_cpu(sync_info, cpu);
 	unsigned int b_min = s->boost_min;
 	unsigned int ib_min = s->input_boost_min;
+	unsigned int pb_min = s->plug_boost_min;
 	unsigned int min;
 
 	if (val != CPUFREQ_ADJUST)
 		return NOTIFY_OK;
 
-	if (!b_min && !ib_min)
+	if (!b_min && !ib_min && !pb_min)
 		return NOTIFY_OK;
 
-	min = max(b_min, ib_min);
+	min = max(max(b_min, ib_min), pb_min);
 
 	pr_debug("CPU%u policy min before boost: %u kHz\n",
 		 cpu, policy->min);
@@ -124,6 +141,17 @@ static void do_input_boost_rem(struct work_struct *work)
 	cpufreq_update_policy(s->cpu);
 }
 
+static void do_plug_boost_rem(struct work_struct *work)
+{
+	struct cpu_sync *s = container_of(work, struct cpu_sync,
+						plug_boost_rem.work);
+
+	pr_debug("Removing plug boost for CPU%d\n", s->cpu);
+	s->plug_boost_min = 0;
+	/* Force policy re-evaluation to trigger adjust notifier. */
+	cpufreq_update_policy(s->cpu);
+}
+
 static int boost_migration_should_run(unsigned int cpu)
 {
 	struct cpu_sync *s = &per_cpu(sync_info, cpu);
@@ -139,6 +167,7 @@ static void run_boost_migration(unsigned int cpu)
 	struct cpufreq_policy dest_policy;
 	struct cpufreq_policy src_policy;
 	unsigned long flags;
+	unsigned int req_freq;
 
 	spin_lock_irqsave(&s->lock, flags);
 	s->pending = false;
@@ -153,24 +182,21 @@ static void run_boost_migration(unsigned int cpu)
 	if (ret)
 		return;
 
-	if (dest_policy.cur >= src_policy.cur ) {
-		pr_debug("No sync. CPU%d@%dKHz >= CPU%d@%dKHz\n",
-			 dest_cpu, dest_policy.cur, src_cpu, src_policy.cur);
+	req_freq = load_based_syncs ?
+		(dest_policy.max * s->task_load) / 100 :
+						src_policy.cur;
+
+	if (req_freq <= dest_policy.cpuinfo.min_freq) {
+			pr_debug("No sync. Sync Freq:%u\n", req_freq);
 		return;
 	}
 
-	if (sync_threshold && (dest_policy.cur >= sync_threshold))
-		return;
+	if (sync_threshold)
+		req_freq = min(sync_threshold, req_freq);
 
 	cancel_delayed_work_sync(&s->boost_rem);
-	if (sync_threshold) {
-		if (src_policy.cur >= sync_threshold)
-			s->boost_min = sync_threshold;
-		else
-			s->boost_min = src_policy.cur;
-	} else {
-		s->boost_min = src_policy.cur;
-	}
+
+	s->boost_min = req_freq;
 
 	/* Force policy re-evaluation to trigger adjust notifier. */
 	get_online_cpus();
@@ -222,10 +248,22 @@ static struct smp_hotplug_thread cpuboost_threads = {
 };
 
 static int boost_migration_notify(struct notifier_block *nb,
-				unsigned long dest_cpu, void *arg)
+				unsigned long unused, void *arg)
 {
+	struct migration_notify_data *mnd = arg;
 	unsigned long flags;
-	struct cpu_sync *s = &per_cpu(sync_info, dest_cpu);
+	struct cpu_sync *s = &per_cpu(sync_info, mnd->dest_cpu);
+
+	if (load_based_syncs && (mnd->load <= migration_load_threshold))
+		return NOTIFY_OK;
+
+	if (load_based_syncs && ((mnd->load < 0) || (mnd->load > 100))) {
+		pr_err("cpu-boost:Invalid load: %d\n", mnd->load);
+		return NOTIFY_OK;
+	}
+
+	if (!load_based_syncs && (mnd->src_cpu == mnd->dest_cpu))
+		return NOTIFY_OK;
 
 	if (!boost_ms)
 		return NOTIFY_OK;
@@ -234,10 +272,11 @@ static int boost_migration_notify(struct notifier_block *nb,
 	if (thread == current)
 		return NOTIFY_OK;
 
-	pr_debug("Migration: CPU%d --> CPU%d\n", (int) arg, (int) dest_cpu);
+	pr_debug("Migration: CPU%d --> CPU%d\n", mnd->src_cpu, mnd->dest_cpu);
 	spin_lock_irqsave(&s->lock, flags);
 	s->pending = true;
-	s->src_cpu = (int) arg;
+	s->src_cpu = mnd->src_cpu;
+	s->task_load = load_based_syncs ? mnd->load : 0;
 	spin_unlock_irqrestore(&s->lock, flags);
 
 	return NOTIFY_OK;
@@ -363,6 +402,56 @@ static struct input_handler cpuboost_input_handler = {
 	.id_table       = cpuboost_ids,
 };
 
+static void do_plug_boost(struct work_struct *work)
+{
+	unsigned int i, ret;
+	struct cpu_sync *i_sync_info;
+	struct cpufreq_policy policy;
+
+	get_online_cpus();
+	for_each_online_cpu(i) {
+
+		i_sync_info = &per_cpu(sync_info, i);
+		ret = cpufreq_get_policy(&policy, i);
+		if (ret)
+			continue;
+		if (policy.cur >= plug_boost_freq)
+			continue;
+
+		cancel_delayed_work_sync(&i_sync_info->plug_boost_rem);
+		pr_debug("Applying plug boost for CPU%u %u --> %u\n",
+			 i, policy.cur, plug_boost_freq);
+		i_sync_info->plug_boost_min = plug_boost_freq;
+		cpufreq_update_policy(i);
+		queue_delayed_work_on(i_sync_info->cpu, cpu_boost_wq,
+			&i_sync_info->plug_boost_rem,
+			msecs_to_jiffies(plug_boost_ms));
+	}
+	put_online_cpus();
+}
+
+static int cpuboost_cpu_callback(struct notifier_block *cpu_nb,
+				 unsigned long action, void *hcpu)
+{
+	switch (action & ~CPU_TASKS_FROZEN) {
+	case CPU_UP_PREPARE:
+	case CPU_DEAD:
+	case CPU_UP_CANCELED:
+		break;
+	case CPU_ONLINE:
+		if (plug_boost_freq && !work_pending(&plug_boost_work))
+			queue_work(cpu_boost_wq, &plug_boost_work);
+		break;
+	default:
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block __refdata cpu_nblk = {
+        .notifier_call = cpuboost_cpu_callback,
+};
+
 static int cpu_boost_init(void)
 {
 	int cpu, ret;
@@ -373,6 +462,7 @@ static int cpu_boost_init(void)
 		return -EFAULT;
 
 	INIT_WORK(&input_boost_work, do_input_boost);
+	INIT_WORK(&plug_boost_work, do_plug_boost);
 
 	for_each_possible_cpu(cpu) {
 		s = &per_cpu(sync_info, cpu);
@@ -380,6 +470,7 @@ static int cpu_boost_init(void)
 		spin_lock_init(&s->lock);
 		INIT_DELAYED_WORK(&s->boost_rem, do_boost_rem);
 		INIT_DELAYED_WORK(&s->input_boost_rem, do_input_boost_rem);
+		INIT_DELAYED_WORK(&s->plug_boost_rem, do_plug_boost_rem);
 	}
 	cpufreq_register_notifier(&boost_adjust_nb, CPUFREQ_POLICY_NOTIFIER);
 	atomic_notifier_chain_register(&migration_notifier_head,
@@ -392,6 +483,10 @@ static int cpu_boost_init(void)
 	ret = input_register_handler(&cpuboost_input_handler);
 	if (ret)
 		pr_err("Cannot register cpuboost input handler.\n");
+
+	ret = register_hotcpu_notifier(&cpu_nblk);
+	if (ret)
+		pr_err("Cannot register cpuboost hotplug handler.\n");
 
 	return ret;
 }

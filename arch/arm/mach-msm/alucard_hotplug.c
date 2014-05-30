@@ -31,7 +31,6 @@
 #endif  /* CONFIG_POWERSUSPEND || CONFIG_HAS_EARLYSUSPEND */
 
 static struct delayed_work alucard_hotplug_work;
-static struct workqueue_struct *alucardhp_wq;
 
 static struct hotplug_cpuinfo {
 #ifndef CONFIG_ALUCARD_HOTPLUG_USE_CPU_UTIL
@@ -46,6 +45,8 @@ static struct hotplug_cpuinfo {
 };
 
 static DEFINE_PER_CPU(struct hotplug_cpuinfo, od_hotplug_cpuinfo);
+
+static struct workqueue_struct *alucardhp_wq;
 
 static bool suspended = false;
 static bool force_cpu_up = false;
@@ -168,27 +169,22 @@ static unsigned int hotplug_rate[4][2] = {
 
 static int __cpuinit hotplug_work_fn(struct work_struct *work)
 {
-	unsigned int sampling_rate = hotplug_tuners_ins.hotplug_sampling_rate;
-	int delay;
 	int upmaxcoreslimit = 0;
 	int schedule_down_cpu = 3;
 	int schedule_up_cpu = 0;
 	unsigned int cpu = 0;
 	int online_cpu = 0;
 	int offline_cpu = 0;
-	int ref_cpu = -1;
-	int i = 0;
 	int online_cpus = 0;
 	unsigned int rq_avg;
 	int cpus_off[4] = {-1, -1, -1, -1};
 	int cpus_on[4] = {-1, -1, -1, -1};
 	int idx_off = 0;
-	bool suspend = suspended;
 	bool force_up = force_cpu_up;
 
 	rq_avg = get_nr_run_avg();
 
-	if (suspend)
+	if (suspended)
 		upmaxcoreslimit = hotplug_tuners_ins.maxcoreslimit_sleep;
 	else
 		upmaxcoreslimit = hotplug_tuners_ins.maxcoreslimit;
@@ -198,16 +194,10 @@ static int __cpuinit hotplug_work_fn(struct work_struct *work)
 		per_cpu(od_hotplug_cpuinfo, 0).up_cpu = -1;
 
 	for_each_cpu_not(cpu, cpu_online_mask) {
-		struct hotplug_cpuinfo *pcpu_info = &per_cpu(od_hotplug_cpuinfo, cpu);
-
 		cpus_off[idx_off] = cpu;
 		++idx_off;
 		++schedule_up_cpu;
 		--schedule_down_cpu;
-
-		pcpu_info->online = false;
-		pcpu_info->up_cpu = -1;
-		pcpu_info->up_by_cpu = -1;
 	}
 
 	for_each_online_cpu(cpu) {
@@ -314,17 +304,17 @@ static int __cpuinit hotplug_work_fn(struct work_struct *work)
 	}
 
 	if (offline_cpu > 0) {
-		for (i = 0; i < offline_cpu; i++) {
-			if (per_cpu(od_hotplug_cpuinfo, cpus_off[i]).online == true) {
-				cpu_up(cpus_off[i]);
+		for (cpu = 0; cpu < offline_cpu; cpu++) {
+			if (per_cpu(od_hotplug_cpuinfo, cpus_off[cpu]).online == true) {
+				cpu_up(cpus_off[cpu]);
 			}
 		}
 	}
 
 	if (online_cpu > 0) {
-		for (i = 0; i < online_cpu; i++) {
-			if (per_cpu(od_hotplug_cpuinfo, cpus_on[i]).online == false) {
-				cpu_down(cpus_on[i]);
+		for (cpu = 0; cpu < online_cpu; cpu++) {
+			if (per_cpu(od_hotplug_cpuinfo, cpus_on[cpu]).online == false) {
+				cpu_down(cpus_on[cpu]);
 			}
 		}
 	}
@@ -332,8 +322,8 @@ static int __cpuinit hotplug_work_fn(struct work_struct *work)
 	if (force_up == true)
 		force_cpu_up = false;
 
-	delay = msecs_to_jiffies(sampling_rate);
-	queue_delayed_work(alucardhp_wq, &alucard_hotplug_work, delay);
+	queue_delayed_work_on(0, alucardhp_wq, &alucard_hotplug_work,
+							  msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate));
 }
 
 #if defined(CONFIG_POWERSUSPEND) || defined(CONFIG_HAS_EARLYSUSPEND)
@@ -406,21 +396,6 @@ static void down_cpu_work(unsigned int cpu)
 	pcpu_info->up_by_cpu = -1;
 }
 
-static void up_cpu_work_failed(unsigned int cpu)
-{
-	per_cpu(od_hotplug_cpuinfo, cpu).online = false;
-	per_cpu(od_hotplug_cpuinfo, cpu).up_by_cpu = -1;
-
-	pr_debug("AH: Error online core %d\n", cpu);
-}
-
-static void down_cpu_work_failed(unsigned int cpu)
-{
-	per_cpu(od_hotplug_cpuinfo, cpu).online == true;
-
-	pr_debug("AH: Error offline" "core %d\n", cpu);
-}
-
 static int alucard_hotplug_callback(struct notifier_block *nb,
 			unsigned long val, void *data)
 {
@@ -433,7 +408,9 @@ static int alucard_hotplug_callback(struct notifier_block *nb,
 		break;
 	case CPU_UP_CANCELED:
 	case CPU_UP_CANCELED_FROZEN:
-		up_cpu_work_failed(cpu);
+		per_cpu(od_hotplug_cpuinfo, cpu).online = false;
+		per_cpu(od_hotplug_cpuinfo, cpu).up_by_cpu = -1;
+		pr_debug("AH: Error online core %d\n", cpu);
 		break;
 	case CPU_DEAD:
 	case CPU_DEAD_FROZEN:
@@ -441,7 +418,8 @@ static int alucard_hotplug_callback(struct notifier_block *nb,
 		break;
 	case CPU_DOWN_FAILED:
 	case CPU_DOWN_FAILED_FROZEN:
-		down_cpu_work_failed(cpu);
+		per_cpu(od_hotplug_cpuinfo, cpu).online == true;
+		pr_debug("AH: Error offline" "core %d\n", cpu);
 		break;
 	}
 	return NOTIFY_OK;
@@ -454,24 +432,19 @@ static struct notifier_block __cpuinitdata alucard_hotplug_nb =
 
 static int hotplug_start(void)
 {
-	int delay = msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate);
 	unsigned int cpu;
+	unsigned int prev_online = 0;
 	int ret = 0;
 
-	alucardhp_wq = alloc_workqueue("alucardplug",
-				WQ_FREEZABLE | WQ_POWER_EFFICIENT, 0);
-//				WQ_HIGHPRI | WQ_FREEZABLE, 1);
-//				WQ_HIGHPRI | WQ_UNBOUND, 0);
+	alucardhp_wq = alloc_workqueue("alucardhp_wq", WQ_HIGHPRI, 0);
 
 	if (!alucardhp_wq) {
-		printk(KERN_ERR "Failed to create \
-				alucardhp workqueue\n");
+		printk(KERN_ERR "Failed to create alucard hotplug workqueue\n");
 		return -EFAULT;
 	}
 
 	ret = init_rq_avg();
 	if (ret) {
-		destroy_workqueue(alucardhp_wq);
 		return ret;
 	}
 
@@ -491,22 +464,31 @@ static int hotplug_start(void)
 				&pcpu_info->prev_cpu_wall, 0);
 #endif
 		pcpu_info->online = cpu_online(cpu);
-		pcpu_info->up_cpu = 1;
-		pcpu_info->up_by_cpu = -1;
 		pcpu_info->cpu_up_rate = 1;
 		pcpu_info->cpu_down_rate = 1;
 
 		if (pcpu_info->online) {
+			pcpu_info->up_cpu = -1;
+			if (cpu == 0) {
+				pcpu_info->up_by_cpu = -1;
+			} else {
+				pcpu_info->up_by_cpu = prev_online;
+				per_cpu(od_hotplug_cpuinfo, prev_online).up_cpu = cpu;
+			}
+			prev_online = cpu;
 			alucard_hotplug_callback(&alucard_hotplug_nb, CPU_UP_PREPARE, cpu);
 			alucard_hotplug_callback(&alucard_hotplug_nb, CPU_ONLINE, cpu);
+		} else {
+			pcpu_info->up_cpu = -1;
+			pcpu_info->up_by_cpu = -1;
 		}
 	}
 	put_online_cpus();
 
 	init_rq_avg_stats;
 	INIT_DELAYED_WORK(&alucard_hotplug_work, hotplug_work_fn);
-	queue_delayed_work(alucardhp_wq, &alucard_hotplug_work,
-						delay);
+	queue_delayed_work_on(0, alucardhp_wq, &alucard_hotplug_work,
+						msecs_to_jiffies(hotplug_tuners_ins.hotplug_sampling_rate));
 
 #if defined(CONFIG_POWERSUSPEND)
 	register_power_suspend(&alucard_hotplug_power_suspend_driver);
