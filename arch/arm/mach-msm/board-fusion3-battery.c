@@ -323,13 +323,13 @@ static int sec_bat_get_cable_from_extended_cable_type(
 	if (force_fast_charge == FAST_CHARGE_FORCE_AC) {
 		switch(cable_type) {
 			/* These are low current USB connections,
-			   apply normal 0.9A AC levels to USB */
+			   apply 1.A level to USB */
 			case POWER_SUPPLY_TYPE_USB:
 			case POWER_SUPPLY_TYPE_USB_ACA:
 			case POWER_SUPPLY_TYPE_CARDOCK:
 			case POWER_SUPPLY_TYPE_OTG:
-				charge_current_max = USB_CHARGE_900;
-				charge_current     = USB_CHARGE_900;
+				charge_current_max = USB_CHARGE_1000;
+				charge_current     = USB_CHARGE_1000;
 				break;
 
 		}
@@ -352,7 +352,7 @@ static int sec_bat_get_cable_from_extended_cable_type(
 			   for all of them */
 			case POWER_SUPPLY_TYPE_MAINS:
 				charge_current_max = ac_charge_level;
-				/* but never go above 1.6A */
+				/* but never go above 1.9A */
 				charge_current     =
 					min(ac_charge_level, MAX_CHARGE_LEVEL);
 				break;
@@ -388,14 +388,6 @@ static bool sec_bat_check_cable_result_callback(
 
 	if(system_rev >= 0x8)
 	{
-#ifdef CONFIG_SAMSUNG_BATTERY_FACTORY
-		pr_info("%s set ldo on\n", __func__);
-		l29 = regulator_get(NULL, "8921_l29");
-		if(l29 > 0)
-		{
-			regulator_enable(l29);
-		}
-#else
 		if (current_cable_type == POWER_SUPPLY_TYPE_BATTERY)
 		{
 			pr_info("%s set ldo off\n", __func__);
@@ -414,7 +406,6 @@ static bool sec_bat_check_cable_result_callback(
 				regulator_enable(l29);
 			}
 		}
-#endif
 	}
 	return true;
 }
@@ -441,20 +432,6 @@ static bool sec_bat_check_callback(void)
 				__func__, POWER_SUPPLY_PROP_PRESENT, ret);
 			value.intval = 1;
 		}
-#if defined(CONFIG_BOARD_JF_REFRESH)
-		{
-			int data;
-			struct pm8xxx_adc_chan_result result;
-
-			pm8xxx_adc_read(ADC_MPP_1_AMUX8, &result);
-			data = ((int)result.physical) / 1000;
-			pr_info("%s: result.physical(%d)\n", __func__, data);
-			if(data < SHORT_BATTERY_STANDARD) {
-				pr_info("%s: Short Battery is connected.\n", __func__);
-				value.intval = 0;
-			}
-		}
-#endif
 	}
 
 	return value.intval;
@@ -586,20 +563,7 @@ static int polling_time_table[] = {
 #endif
 };
 
-#if defined(CONFIG_BOARD_JF_REFRESH)
-/* for MAX17048 */
-static struct battery_data_t fusion3_battery_data[] = {
-	/* SDI battery data (High voltage 4.35V) */
-	{
-		.RCOMP0 = 0x77,
-		.RCOMP_charging = 0x70,
-		.temp_cohot = -700,
-		.temp_cocold = -4875,
-		.is_using_model_data = true,
-		.type_str = "SDI",
-	}
-};
-#elif defined(CONFIG_MACH_JF_ATT) || defined(CONFIG_MACH_JF_TMO) || \
+#if defined(CONFIG_MACH_JF_ATT) || defined(CONFIG_MACH_JF_TMO) || \
 	defined(CONFIG_MACH_JF_SPR) || defined(CONFIG_MACH_JF_USC) || \
 	defined(CONFIG_MACH_JF_VZW)
 /* for MAX17048 */
@@ -763,7 +727,7 @@ sec_battery_platform_data_t sec_battery_pdata = {
 	.temp_low_threshold_normal = -30,
 	.temp_low_recovery_normal = 0,
 
-	.temp_high_threshold_lpm = 470,
+	.temp_high_threshold_lpm = 500,
 	.temp_high_recovery_lpm = 430,
 	.temp_low_threshold_lpm = -30,
 	.temp_low_recovery_lpm = 0,
@@ -797,21 +761,6 @@ sec_battery_platform_data_t sec_battery_pdata = {
 	.temp_high_recovery_lpm = 400,
 	.temp_low_threshold_lpm = -50,
 	.temp_low_recovery_lpm = 0,
-#elif defined(CONFIG_BOARD_JF_REFRESH)
-	.temp_high_threshold_event = 600,
-	.temp_high_recovery_event = 400,
-	.temp_low_threshold_event = -30,
-	.temp_low_recovery_event = 0,
-
-	.temp_high_threshold_normal = 550,
-	.temp_high_recovery_normal = 430,
-	.temp_low_threshold_normal = -30,
-	.temp_low_recovery_normal = 0,
-
-	.temp_high_threshold_lpm = 495,
-	.temp_high_recovery_lpm = 448,
-	.temp_low_threshold_lpm = -10,
-	.temp_low_recovery_lpm = 20,
 #elif defined(CONFIG_MACH_JF_SPR)
 	.temp_high_threshold_event = 600,
 	.temp_high_recovery_event = 400,

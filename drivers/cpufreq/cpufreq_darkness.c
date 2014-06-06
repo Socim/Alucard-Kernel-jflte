@@ -35,17 +35,6 @@
  */
 
 static void do_darkness_timer(struct work_struct *work);
-static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
-				unsigned int event);
-
-#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_DARKNESS
-static
-#endif
-struct cpufreq_governor cpufreq_gov_darkness = {
-	.name                   = "darkness",
-	.governor               = cpufreq_governor_darkness,
-	.owner                  = THIS_MODULE,
-};
 
 struct cpufreq_darkness_cpuinfo {
 	u64 prev_cpu_wall;
@@ -53,7 +42,9 @@ struct cpufreq_darkness_cpuinfo {
 	struct cpufreq_frequency_table *freq_table;
 	struct delayed_work work;
 	struct cpufreq_policy *cur_policy;
+#if 0
 	ktime_t time_stamp;
+#endif
 	int cpu;
 	unsigned int enable:1;
 	/*
@@ -131,6 +122,7 @@ static struct attribute_group darkness_attr_group = {
 
 /************************** sysfs end ************************/
 
+#if 0
 /* Will return if we need to evaluate cpu load again or not */
 static inline bool need_load_eval(struct cpufreq_darkness_cpuinfo *this_darkness_cpuinfo,
 		unsigned int sampling_rate)
@@ -146,6 +138,7 @@ static inline bool need_load_eval(struct cpufreq_darkness_cpuinfo *this_darkness
 
 	return true;
 }
+#endif
 
 static void darkness_check_cpu(struct cpufreq_darkness_cpuinfo *this_darkness_cpuinfo)
 {
@@ -227,8 +220,10 @@ static void do_darkness_timer(struct work_struct *work)
 		delay -= jiffies % delay;
 	}
 
+#if 0
 	if (need_load_eval(darkness_cpuinfo, sampling_rate))
-		darkness_check_cpu(darkness_cpuinfo);
+#endif
+	darkness_check_cpu(darkness_cpuinfo);
 
 	queue_delayed_work_on(cpu, darkness_wq, &darkness_cpuinfo->work, delay);
 	mutex_unlock(&darkness_cpuinfo->timer_mutex);
@@ -276,8 +271,10 @@ static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 
 		mutex_init(&this_darkness_cpuinfo->timer_mutex);
 
+#if 0
 		/* Initiate timer time stamp */
 		this_darkness_cpuinfo->time_stamp = ktime_get();
+#endif
 
 		delay=usecs_to_jiffies(darkness_tuners_ins.sampling_rate);
 		if (num_online_cpus() > 1) {
@@ -325,6 +322,15 @@ static int cpufreq_governor_darkness(struct cpufreq_policy *policy,
 	}
 	return 0;
 }
+
+#ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_DARKNESS
+static
+#endif
+struct cpufreq_governor cpufreq_gov_darkness = {
+	.name                   = "darkness",
+	.governor               = cpufreq_governor_darkness,
+	.owner                  = THIS_MODULE,
+};
 
 static int __init cpufreq_gov_darkness_init(void)
 {
