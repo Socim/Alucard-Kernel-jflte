@@ -39,6 +39,7 @@
 #include <linux/nmi.h>
 #include <linux/fs.h>
 #include <linux/coresight-stm.h>
+#include <linux/sched/rt.h>
 
 #include "trace.h"
 #include "trace_output.h"
@@ -2784,8 +2785,12 @@ int set_tracer_flag(unsigned int mask, int enabled)
 	if (mask == TRACE_ITER_RECORD_CMD)
 		trace_event_enable_cmd_record(enabled);
 
-	if (mask == TRACE_ITER_OVERWRITE)
+	if (mask == TRACE_ITER_OVERWRITE) {
 		ring_buffer_change_overwrite(global_trace.buffer, enabled);
+#ifdef CONFIG_TRACER_MAX_TRACE
+		ring_buffer_change_overwrite(max_tr.buffer, enabled);
+#endif
+	}
 
 	return 0;
 }
