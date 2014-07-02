@@ -94,13 +94,7 @@ struct vfsmount;
 struct dentry;
 
 extern int expand_files(struct files_struct *, int nr);
-extern void free_fdtable_rcu(struct rcu_head *rcu);
 extern void __init files_defer_init(void);
-
-static inline void free_fdtable(struct fdtable *fdt)
-{
-	call_rcu(&fdt->rcu, free_fdtable_rcu);
-}
 
 static inline struct file * fcheck_files(struct files_struct *files, unsigned int fd)
 {
@@ -127,6 +121,13 @@ struct files_struct *dup_fd(struct files_struct *, int *);
 int iterate_fd(struct files_struct *, unsigned,
 		int (*)(const void *, struct file *, unsigned),
 		const void *);
+
+extern int __alloc_fd(struct files_struct *files,
+		      unsigned start, unsigned end, unsigned flags);
+extern void __fd_install(struct files_struct *files,
+		      unsigned int fd, struct file *file);
+extern int __close_fd(struct files_struct *files,
+		      unsigned int fd);
 
 extern struct kmem_cache *files_cachep;
 

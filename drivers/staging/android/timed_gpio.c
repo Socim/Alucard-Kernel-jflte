@@ -90,7 +90,8 @@ static int timed_gpio_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -EBUSY;
 
-	gpio_data = kzalloc(sizeof(struct timed_gpio_data) * pdata->num_gpios,
+	gpio_data = devm_kzalloc(&pdev->dev,
+			sizeof(struct timed_gpio_data) * pdata->num_gpios,
 			GFP_KERNEL);
 	if (!gpio_data)
 		return -ENOMEM;
@@ -131,7 +132,6 @@ err_out:
 		timed_output_dev_unregister(&gpio_data[i].dev);
 		gpio_free(gpio_data[i].gpio);
 	}
-	kfree(gpio_data);
 
 	return ret;
 }
@@ -147,8 +147,6 @@ static int timed_gpio_remove(struct platform_device *pdev)
 		gpio_free(gpio_data[i].gpio);
 	}
 
-	kfree(gpio_data);
-
 	return 0;
 }
 
@@ -161,18 +159,7 @@ static struct platform_driver timed_gpio_driver = {
 	},
 };
 
-static int __init timed_gpio_init(void)
-{
-	return platform_driver_register(&timed_gpio_driver);
-}
-
-static void __exit timed_gpio_exit(void)
-{
-	platform_driver_unregister(&timed_gpio_driver);
-}
-
-module_init(timed_gpio_init);
-module_exit(timed_gpio_exit);
+module_platform_driver(timed_gpio_driver);
 
 MODULE_AUTHOR("Mike Lockwood <lockwood@android.com>");
 MODULE_DESCRIPTION("timed gpio driver");

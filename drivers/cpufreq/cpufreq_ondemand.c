@@ -221,6 +221,11 @@ static struct dbs_tuners {
 	.sampling_rate = DEF_SAMPLING_RATE,
 };
 
+#ifdef CONFIG_MACH_LGE
+/* Boost CPU When wakeup */
+extern int boost_freq;
+#endif
+
 #ifdef CONFIG_CPU_BOOST
 extern u64 last_input_time;
 #endif
@@ -1066,21 +1071,6 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 
 		if (max_load_other_cpu < j_dbs_info->max_load)
 			max_load_other_cpu = j_dbs_info->max_load;
-		/*
-		 * The other cpu could be running at higher frequency
-		 * but may not have completed it's sampling_down_factor.
-		 * For that case consider other cpu is loaded so that
-		 * frequency imbalance does not occur.
-		 */
-
-		if ((j_dbs_info->cur_policy != NULL)
-			&& (j_dbs_info->cur_policy->cur ==
-					j_dbs_info->cur_policy->max)) {
-
-			if (policy->cur >= dbs_tuners_ins.optimal_freq)
-				max_load_other_cpu =
-				dbs_tuners_ins.up_threshold_any_cpu_load;
-		}
 	}
 
 	/* calculate the scaled load across CPU */
@@ -1145,15 +1135,33 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 				reset_hist(&hist_load[core_j]);
 			}
 #endif
+
+#ifdef CONFIG_MACH_LGE
+/* Boost CPU When wakeup */
+			if (boost_freq == 2) {
+				if (policy->cur < policy->max) {
+					dbs_freq_increase(policy, policy->max);
+					return;
+				}
+			}
+#endif
 			if (freq_next == policy->max)
 				this_dbs_info->rate_mult =
 					dbs_tuners_ins.sampling_down_factor;
 
 			dbs_freq_increase(policy, freq_next);
-
 			return;
 		}
 	} else {
+#ifdef CONFIG_MACH_LGE
+/* Boost CPU When wakeup */
+		if (boost_freq == 2) {
+			if (policy->cur < policy->max) {
+				dbs_freq_increase(policy, policy->max);
+			}
+			return;
+		}
+#endif
 		/* Check for frequency increase */
 		if (max_load_freq > dbs_tuners_ins.up_threshold * policy->cur) {
 			int freq_target, freq_div;
