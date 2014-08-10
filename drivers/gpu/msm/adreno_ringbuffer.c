@@ -64,7 +64,7 @@ adreno_ringbuffer_waitspace(struct adreno_ringbuffer *rb,
 	unsigned long wait_time;
 	unsigned long wait_timeout = msecs_to_jiffies(ADRENO_IDLE_TIMEOUT);
 	unsigned long wait_time_part;
-	unsigned int prev_reg_val[FT_DETECT_REGS_COUNT];
+	unsigned int prev_reg_val[ft_detect_regs_count];
 
 	memset(prev_reg_val, 0, sizeof(prev_reg_val));
 
@@ -85,10 +85,6 @@ adreno_ringbuffer_waitspace(struct adreno_ringbuffer *rb,
 		do {
 			GSL_RB_GET_READPTR(rb, &rb->rptr);
 		} while (!rb->rptr);
-
-		rb->wptr++;
-
-		adreno_ringbuffer_submit(rb);
 
 		rb->wptr = 0;
 	}
@@ -580,9 +576,6 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 	if (KGSL_MEMSTORE_GLOBAL != context_id)
 		total_sizedwords += 3; /* global timestamp without cache
 					* flush for non-zero context */
-
-	if (flags & KGSL_CMD_FLAGS_EOF)
-		total_sizedwords += 2;
 
 	ringcmds = adreno_ringbuffer_allocspace(rb, context, total_sizedwords);
 	if (!ringcmds)
@@ -1100,9 +1093,8 @@ adreno_ringbuffer_issueibcmds(struct kgsl_device_private *dev_priv,
 	}
 
 done:
-	kgsl_trace_issueibcmds(device, context ? context->id : 0, ibdesc,
-		numibs, *timestamp, flags, ret,
-		drawctxt ? drawctxt->type : 0);
+	kgsl_trace_issueibcmds(device, context->id, ibdesc, numibs,
+		*timestamp, flags, ret, drawctxt->type);
 
 	kfree(link);
 	return ret;
