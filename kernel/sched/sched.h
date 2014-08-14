@@ -217,6 +217,8 @@ struct task_group {
 	unsigned long shares;
 
 	atomic_t load_weight;
+	atomic64_t load_avg;
+	atomic_t runnable_avg;
 #endif
 
 #ifdef CONFIG_RT_GROUP_SCHED
@@ -283,7 +285,7 @@ extern void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern int sched_group_set_shares(struct task_group *tg, unsigned long shares);
 
 extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
-extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
+extern void __start_cfs_bandwidth(struct cfs_bandwidth *cfs_b, bool force);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
 extern void free_rt_sched_group(struct task_group *tg);
@@ -337,6 +339,38 @@ struct cfs_rq {
 	unsigned int nr_spread_over;
 #endif
 
+#ifdef CONFIG_SMP
+/*
+ * Load-tracking only depends on SMP, FAIR_GROUP_SCHED dependency below may be
+ * removed when useful for applications beyond shares distribution (e.g.
+ * load-balance).
+ */
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	/*
+	 * CFS Load tracking
+	 * Under CFS, load is tracked on a per-entity basis and aggregated up.
+	 * This allows for the description of both thread and group usage (in
+	 * the FAIR_GROUP_SCHED case).
+	 */
+	u64 runnable_load_avg, blocked_load_avg;
+	atomic64_t decay_counter, removed_load;
+	u64 last_decay;
+#endif /* CONFIG_FAIR_GROUP_SCHED */
+/* These always depend on CONFIG_FAIR_GROUP_SCHED */
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	u32 tg_runnable_contrib;
+	u64 tg_load_contrib;
+#endif /* CONFIG_FAIR_GROUP_SCHED */
+
+	/*
+	 *   h_load = weight * f(tg)
+	 *
+	 * Where f(tg) is the recursive weight fraction assigned to
+	 * this group.
+	 */
+	unsigned long h_load;
+#endif /* CONFIG_SMP */
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	struct rq *rq;	/* cpu runqueue to which this cfs_rq is attached */
 
@@ -352,34 +386,13 @@ struct cfs_rq {
 	struct list_head leaf_cfs_rq_list;
 	struct task_group *tg;	/* group that "owns" this runqueue */
 
-#ifdef CONFIG_SMP
-	/*
-	 *   h_load = weight * f(tg)
-	 *
-	 * Where f(tg) is the recursive weight fraction assigned to
-	 * this group.
-	 */
-	unsigned long h_load;
-
-	/*
-	 * Maintaining per-cpu shares distribution for group scheduling
-	 *
-	 * load_stamp is the last time we updated the load average
-	 * load_last is the last time we updated the load average and saw load
-	 * load_unacc_exec_time is currently unaccounted execution time
-	 */
-	u64 load_avg;
-	u64 load_period;
-	u64 load_stamp, load_last, load_unacc_exec_time;
-
-	unsigned long load_contribution;
-#endif /* CONFIG_SMP */
 #ifdef CONFIG_CFS_BANDWIDTH
 	int runtime_enabled;
 	u64 runtime_expires;
 	s64 runtime_remaining;
 
-	u64 throttled_timestamp;
+	u64 throttled_clock, throttled_clock_task;
+	u64 throttled_clock_task_time;
 	int throttled, throttle_count;
 	struct list_head throttled_list;
 #endif /* CONFIG_CFS_BANDWIDTH */
@@ -570,6 +583,7 @@ struct rq {
 	int post_schedule;
 	int active_balance;
 	int push_cpu;
+	struct task_struct *push_task;
 	struct cpu_stop_work active_balance_work;
 	/* cpu of this runqueue: */
 	int cpu;
@@ -581,13 +595,34 @@ struct rq {
 	u64 age_stamp;
 	u64 idle_stamp;
 	u64 avg_idle;
+	int cstate, wakeup_latency, wakeup_energy;
 
 	/* Set to max idle balance cost for any one sched domain */
 	u64 max_idle_balance_cost;
 #endif
 
-	int cur_freq, max_freq, min_freq;
+#if defined(CONFIG_SCHED_FREQ_INPUT) || defined(CONFIG_SCHED_HMP)
+	/*
+	 * max_freq = user or thermal defined maximum
+	 * max_possible_freq = maximum supported by hardware
+	 */
+	unsigned int cur_freq, max_freq, min_freq, max_possible_freq;
+	struct cpumask freq_domain_cpumask;
+
 	u64 cumulative_runnable_avg;
+	int efficiency; /* Differentiate cpus with different IPC capability */
+	int load_scale_factor;
+	int capacity;
+	int max_possible_capacity;
+	u64 window_start;
+
+	unsigned int curr_runnable_sum;
+	unsigned int prev_runnable_sum;
+#endif
+
+#ifdef CONFIG_SCHED_HMP
+	int nr_small_tasks, nr_big_tasks;
+#endif
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
@@ -632,6 +667,8 @@ struct rq {
 #ifdef CONFIG_SMP
 	struct llist_head wake_list;
 #endif
+
+	struct sched_avg avg;
 };
 
 static inline int cpu_of(struct rq *rq)
@@ -741,6 +778,7 @@ struct sched_group_power {
 struct sched_group {
 	struct sched_group *next;	/* Must be a circular list */
 	atomic_t ref;
+	int balance_cpu;
 
 	unsigned int group_weight;
 	struct sched_group_power *sgp;
@@ -774,22 +812,116 @@ static inline unsigned int group_first_cpu(struct sched_group *group)
 #include "stats.h"
 #include "auto_group.h"
 
-extern unsigned int sched_ravg_window;
-extern unsigned int pct_task_load(struct task_struct *p);
 extern void init_new_task_load(struct task_struct *p);
+
+#if defined(CONFIG_SCHED_FREQ_INPUT) || defined(CONFIG_SCHED_HMP)
+
+extern unsigned int sched_ravg_window;
+extern unsigned int sched_use_pelt;
+extern unsigned int max_possible_freq;
+extern unsigned int min_max_freq;
+extern unsigned int pct_task_load(struct task_struct *p);
+extern unsigned int max_possible_efficiency;
+extern unsigned int min_possible_efficiency;
+extern unsigned int max_capacity;
+extern unsigned int min_capacity;
+extern unsigned int max_load_scale_factor;
+extern unsigned long capacity_scale_cpu_efficiency(int cpu);
+extern unsigned long capacity_scale_cpu_freq(int cpu);
+extern unsigned int sched_mostly_idle_load;
+extern unsigned int sched_small_task;
+extern unsigned int sched_upmigrate;
+extern unsigned int sched_downmigrate;
+extern unsigned int sched_init_task_load_pelt;
+extern unsigned int sched_init_task_load_windows;
+extern void fixup_nr_big_small_task(int cpu);
+
+u64 scale_load_to_cpu(u64 load, int cpu);
+unsigned int max_task_load(void);
 
 static inline void
 inc_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
 {
-	rq->cumulative_runnable_avg += p->ravg.demand;
+	if (sched_use_pelt)
+		rq->cumulative_runnable_avg +=
+				p->se.avg.runnable_avg_sum_scaled;
+	else
+		rq->cumulative_runnable_avg += p->ravg.demand;
 }
 
 static inline void
 dec_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
 {
-	rq->cumulative_runnable_avg -= p->ravg.demand;
+	if (sched_use_pelt)
+		rq->cumulative_runnable_avg -=
+				p->se.avg.runnable_avg_sum_scaled;
+	else
+		rq->cumulative_runnable_avg -= p->ravg.demand;
 	BUG_ON((s64)rq->cumulative_runnable_avg < 0);
 }
+
+#else	/* CONFIG_SCHED_FREQ_INPUT || CONFIG_SCHED_HMP */
+
+static inline int pct_task_load(struct task_struct *p) { return 0; }
+
+static inline void
+inc_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline void
+dec_cumulative_runnable_avg(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline unsigned long capacity_scale_cpu_efficiency(int cpu)
+{
+	return SCHED_LOAD_SCALE;
+}
+
+static inline unsigned long capacity_scale_cpu_freq(int cpu)
+{
+	return SCHED_LOAD_SCALE;
+}
+
+#endif	/* CONFIG_SCHED_FREQ_INPUT || CONFIG_SCHED_HMP */
+
+#ifdef CONFIG_SCHED_HMP
+
+extern unsigned int sched_enable_hmp;
+extern unsigned int sched_enable_power_aware;
+
+int mostly_idle_cpu(int cpu);
+extern void check_for_migration(struct rq *rq, struct task_struct *p);
+extern void pre_big_small_task_count_change(void);
+extern void post_big_small_task_count_change(void);
+extern void inc_nr_big_small_task(struct rq *rq, struct task_struct *p);
+extern void dec_nr_big_small_task(struct rq *rq, struct task_struct *p);
+extern void set_hmp_defaults(void);
+extern unsigned int power_cost_at_freq(int cpu, unsigned int freq);
+
+#else /* CONFIG_SCHED_HMP */
+
+#define sched_enable_hmp 0
+
+static inline void check_for_migration(struct rq *rq, struct task_struct *p) { }
+static inline void pre_big_small_task_count_change(void) { }
+static inline void post_big_small_task_count_change(void) { }
+static inline void set_hmp_defaults(void) { }
+
+static inline void inc_nr_big_small_task(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline void dec_nr_big_small_task(struct rq *rq, struct task_struct *p)
+{
+}
+
+#define power_cost_at_freq(...) 0
+
+#define trace_sched_cpu_load(...)
+
+#endif /* CONFIG_SCHED_HMP */
 
 #ifdef CONFIG_CGROUP_SCHED
 
@@ -1115,6 +1247,7 @@ struct sched_class {
 
 #ifdef CONFIG_SMP
 	int  (*select_task_rq)(struct task_struct *p, int sd_flag, int flags);
+	void (*migrate_task_rq)(struct task_struct *p, int next_cpu);
 
 	void (*pre_schedule) (struct rq *this_rq, struct task_struct *task);
 	void (*post_schedule) (struct rq *this_rq);
@@ -1534,6 +1667,9 @@ enum rq_nohz_flag_bits {
 
 #define nohz_flags(cpu)	(&cpu_rq(cpu)->nohz_flags)
 #endif
+
+#define NOHZ_KICK_ANY 0
+#define NOHZ_KICK_RESTRICT 1
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 

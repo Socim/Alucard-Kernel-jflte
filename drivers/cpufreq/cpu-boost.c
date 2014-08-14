@@ -25,9 +25,18 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/time.h>
-#ifdef CONFIG_LCD_NOTIFY
-#include <linux/lcd_notify.h>
-#endif
+
+/*
+ * debug = 1 will print all
+ */
+static unsigned int debug = 0;
+module_param_named(debug_mask, debug, uint, 0644);
+
+#define dprintk(msg...)		\
+do {				\
+	if (debug)		\
+		pr_info(msg);	\
+} while (0)
 
 struct cpu_sync {
 	struct delayed_work boost_rem;
@@ -49,40 +58,31 @@ static struct workqueue_struct *cpu_boost_wq;
 
 static struct work_struct input_boost_work;
 
-#ifdef CONFIG_LCD_NOTIFY
-static struct notifier_block notif;
-#endif
-
 static struct work_struct plug_boost_work;
 
 static unsigned int boost_ms = 30;
 module_param(boost_ms, uint, 0644);
 
-static unsigned int sync_threshold = 1;
+static unsigned int sync_threshold = 1350000;
 module_param(sync_threshold, uint, 0644);
 
-static unsigned int input_boost_freq;
+static unsigned int input_boost_freq = 1566000;
 module_param(input_boost_freq, uint, 0644);
 
-static unsigned int input_boost_ms = 40;
+static unsigned int input_boost_ms = 30;
 module_param(input_boost_ms, uint, 0644);
 
 static unsigned int migration_load_threshold = 15;
 module_param(migration_load_threshold, uint, 0644);
 
-static bool load_based_syncs;
+static bool load_based_syncs = 1;
 module_param(load_based_syncs, bool, 0644);
 
-static unsigned int plug_boost_freq;
+static unsigned int plug_boost_freq = 0;
 module_param(plug_boost_freq, uint, 0644);
 
-static unsigned int plug_boost_ms = 40;
+static unsigned int plug_boost_ms = 0;
 module_param(plug_boost_ms, uint, 0644);
-
-#ifdef CONFIG_LCD_NOTIFY
-static bool wakeup_boost = 1;
-module_param(wakeup_boost, bool, 0644);
-#endif
 
 static u64 last_input_time;
 #define MIN_INPUT_INTERVAL (150 * USEC_PER_MSEC)
@@ -111,13 +111,13 @@ static int boost_adjust_notify(struct notifier_block *nb, unsigned long val,
 
 	min = max(max(b_min, ib_min), pb_min);
 
-	pr_debug("CPU%u policy min before boost: %u kHz\n",
+	dprintk("CPU%u policy min before boost: %u kHz\n",
 		 cpu, policy->min);
-	pr_debug("CPU%u boost min: %u kHz\n", cpu, min);
+	dprintk("CPU%u boost min: %u kHz\n", cpu, min);
 
 	cpufreq_verify_within_limits(policy, min, UINT_MAX);
 
-	pr_debug("CPU%u policy min after boost: %u kHz\n",
+	dprintk("CPU%u policy min after boost: %u kHz\n",
 		 cpu, policy->min);
 
 	return NOTIFY_OK;
@@ -132,7 +132,7 @@ static void do_boost_rem(struct work_struct *work)
 	struct cpu_sync *s = container_of(work, struct cpu_sync,
 						boost_rem.work);
 
-	pr_debug("Removing boost for CPU%d\n", s->cpu);
+	dprintk("Removing boost for CPU%d\n", s->cpu);
 	s->boost_min = 0;
 	/* Force policy re-evaluation to trigger adjust notifier. */
 	cpufreq_update_policy(s->cpu);
@@ -143,7 +143,7 @@ static void do_input_boost_rem(struct work_struct *work)
 	struct cpu_sync *s = container_of(work, struct cpu_sync,
 						input_boost_rem.work);
 
-	pr_debug("Removing input boost for CPU%d\n", s->cpu);
+	dprintk("Removing input boost for CPU%d\n", s->cpu);
 	s->input_boost_min = 0;
 	/* Force policy re-evaluation to trigger adjust notifier. */
 	cpufreq_update_policy(s->cpu);
@@ -154,7 +154,7 @@ static void do_plug_boost_rem(struct work_struct *work)
 	struct cpu_sync *s = container_of(work, struct cpu_sync,
 						plug_boost_rem.work);
 
-	pr_debug("Removing plug boost for CPU%d\n", s->cpu);
+	dprintk("Removing plug boost for CPU%d\n", s->cpu);
 	s->plug_boost_min = 0;
 	/* Force policy re-evaluation to trigger adjust notifier. */
 	cpufreq_update_policy(s->cpu);
@@ -195,7 +195,7 @@ static void run_boost_migration(unsigned int cpu)
 						src_policy.cur;
 
 	if (req_freq <= dest_policy.cpuinfo.min_freq) {
-			pr_debug("No sync. Sync Freq:%u\n", req_freq);
+			dprintk("No sync. Sync Freq:%u\n", req_freq);
 		return;
 	}
 
@@ -280,7 +280,7 @@ static int boost_migration_notify(struct notifier_block *nb,
 	if (thread == current)
 		return NOTIFY_OK;
 
-	pr_debug("Migration: CPU%d --> CPU%d\n", mnd->src_cpu, mnd->dest_cpu);
+	dprintk("Migration: CPU%d --> CPU%d\n", mnd->src_cpu, mnd->dest_cpu);
 	spin_lock_irqsave(&s->lock, flags);
 	s->pending = true;
 	s->src_cpu = mnd->src_cpu;
@@ -337,6 +337,16 @@ static void cpuboost_input_event(struct input_handle *handle,
 
 	queue_work(cpu_boost_wq, &input_boost_work);
 	last_input_time = ktime_to_us(ktime_get());
+}
+
+bool check_cpuboost(int cpu)
+{
+	struct cpu_sync *i_sync_info;
+	i_sync_info = &per_cpu(sync_info, cpu);
+
+	if (i_sync_info->input_boost_min > 0)
+		return true;
+	return false;
 }
 
 static int cpuboost_input_connect(struct input_handler *handler,
@@ -422,7 +432,7 @@ static void do_plug_boost(struct work_struct *work)
 			continue;
 
 		cancel_delayed_work_sync(&i_sync_info->plug_boost_rem);
-		pr_debug("Applying plug boost for CPU%u %u --> %u\n",
+		dprintk("Applying plug boost for CPU%u %u --> %u\n",
 			 i, policy.cur, plug_boost_freq);
 		i_sync_info->plug_boost_min = plug_boost_freq;
 		cpufreq_update_policy(i);
@@ -454,31 +464,6 @@ static int cpuboost_cpu_callback(struct notifier_block *cpu_nb,
 static struct notifier_block __refdata cpu_nblk = {
         .notifier_call = cpuboost_cpu_callback,
 };
-
-#ifdef CONFIG_LCD_NOTIFY
-static int lcd_notifier_callback(struct notifier_block *this,
-				unsigned long event, void *data)
-{
-	switch (event) {
-	case LCD_EVENT_ON_START:
-	case LCD_EVENT_OFF_END:
-	case LCD_EVENT_OFF_START:
-		break;
-	case LCD_EVENT_ON_END:
-		if (!wakeup_boost || !input_boost_freq ||
-		     work_pending(&input_boost_work))
-			break;
-		pr_debug("Wakeup boost for LCD on event.\n");
-		queue_work(cpu_boost_wq, &input_boost_work);
-		last_input_time = ktime_to_us(ktime_get());
-		break;
-	default:
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-#endif
 
 static int cpu_boost_init(void)
 {
@@ -515,13 +500,6 @@ static int cpu_boost_init(void)
 	ret = register_hotcpu_notifier(&cpu_nblk);
 	if (ret)
 		pr_err("Cannot register cpuboost hotplug handler.\n");
-
-#ifdef CONFIG_LCD_NOTIFY
-	notif.notifier_call = lcd_notifier_callback;
-	ret = lcd_register_client(&notif);
-        if (ret != 0)
-                pr_err("Failed to register hotplug LCD notifier callback.\n");
-#endif
 
 	return ret;
 }
